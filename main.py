@@ -18,10 +18,13 @@ MODELS_TO_BENCHMARK = [
 ]
 
 # MMLU Configuration
-MMLU_SUBSET = 'all'  # Use the 'all' configuration of MMLU
-NUM_QUESTIONS = 100  # Number of questions to evaluate for a quick test
+MMLU_SUBSET = 'all'
+NUM_QUESTIONS = 100  # Number of questions for MMLU evaluation
 
-# --- Helper Functions (from previous script) ---
+# Performance Benchmark Configuration
+PERFORMANCE_PROMPT = "The sun is a star, a glowing ball of hot gas. It is the center of our solar system. Write a short, detailed paragraph about the sun's role in supporting life on Earth."
+
+# --- Helper Functions ---
 def get_installed_models():
     """Returns a set of model names that are already installed locally."""
     return {model['model'] for model in ollama.list()['models']}
@@ -29,7 +32,6 @@ def get_installed_models():
 def pull_model(model_name):
     """Pulls a model from the Ollama registry, showing progress."""
     print(f"\nPulling model: {model_name}")
-    # ... (rest of the function is unchanged, omitted for brevity)
     current_digest = ''
     try:
         for progress in ollama.pull(model_name, stream=True):
@@ -49,74 +51,82 @@ def pull_model(model_name):
         return False
     return True
 
-# --- MMLU Evaluation Functions ---
+# --- Benchmark Functions ---
+def benchmark_performance(model_name, prompt):
+    """Runs a single model performance benchmark and returns the tokens/sec."""
+    print(f"\n--- Benchmarking Performance: {model_name} ---")
+    try:
+        response = ollama.chat(
+            model=model_name,
+            messages=[{'role': 'user', 'content': prompt}],
+        )
+        total_duration = response.get('total_duration', 0)
+        eval_count = response.get('eval_count', 0)
+
+        if total_duration > 0:
+            tokens_per_second = eval_count / (total_duration / 1e9)
+        else:
+            tokens_per_second = 0
+
+        print(f"Tokens/sec: {tokens_per_second:.2f}")
+        return round(tokens_per_second, 2)
+    except Exception as e:
+        print(f"Error during performance benchmark for {model_name}: {e}")
+        return 0
+
 def load_mmlu_dataset(subset, num_questions):
     """Loads and samples the MMLU dataset."""
     print(f"\nLoading MMLU dataset ({subset} subset)...")
     try:
         dataset = load_dataset("cais/mmlu", subset, split='test', streaming=True)
-        shuffled_dataset = dataset.shuffle(seed=42)
-        sample = list(shuffled_dataset.take(num_questions))
+        sample = list(dataset.shuffle(seed=42).take(num_questions))
         print(f"Loaded {len(sample)} questions from MMLU.")
         return sample
     except Exception as e:
         print(f"Failed to load MMLU dataset: {e}")
         return None
 
-def format_mmlu_prompt(item):
-    """Formats a single MMLU question into a standardized prompt."""
-    choices = ['A', 'B', 'C', 'D']
-    prompt = f"The following is a multiple-choice question. Please provide the letter of the correct answer.\n\n"
-    prompt += f"Question: {item['question']}\n"
-    for i, choice in enumerate(item['choices']):
-        prompt += f"{choices[i]}. {choice}\n"
-    prompt += "\nAnswer:"
-    return prompt
-
-def parse_model_answer(response_text):
-    """Extracts the chosen letter (A, B, C, or D) from the model's response."""
-    match = re.search(r'\b([A-D])\b', response_text.strip().upper())
-    if match:
-        return match.group(1)
-    return None # Could not parse an answer
-
 def evaluate_model_on_mmlu(model_name, dataset):
     """Evaluates a model's accuracy on the MMLU dataset sample."""
     print(f"\n--- Evaluating {model_name} on MMLU ---")
     correct = 0
     total = len(dataset)
+    choices = ['A', 'B', 'C', 'D']
     
     for i, item in enumerate(dataset):
         sys.stdout.write(f'\r  Question {i+1}/{total}...')
         sys.stdout.flush()
         
-        prompt = format_mmlu_prompt(item)
-        correct_answer_index = item['answer']
-        correct_answer_letter = ['A', 'B', 'C', 'D'][correct_answer_index]
+        # Format prompt
+        prompt = f"Question: {item['question']}\n"
+        for j, choice in enumerate(item['choices']):
+            prompt += f"{choices[j]}. {choice}\n"
+        prompt += "\nAnswer:"
+
+        correct_answer_letter = choices[item['answer']]
         
         try:
             response = ollama.generate(model=model_name, prompt=prompt)
             response_text = response['response']
-            parsed_answer = parse_model_answer(response_text)
+            # Parse answer
+            match = re.search(r'\b([A-D])\b', response_text.strip().upper())
+            parsed_answer = match.group(1) if match else None
             
             if parsed_answer == correct_answer_letter:
                 correct += 1
-        except Exception as e:
-            print(f"\nAn error occurred while evaluating {model_name}: {e}")
-            # We don't count errors as incorrect, just skip
+        except Exception:
             continue
 
     sys.stdout.write('\n')
     accuracy = (correct / total) * 100 if total > 0 else 0
-    print(f"Accuracy for {model_name}: {accuracy:.2f}%")
+    print(f"MMLU Accuracy: {accuracy:.2f}%")
     return accuracy
 
 # --- Main Execution ---
 def main():
-    """Main function to run the benchmark and evaluation."""
-    print("Starting LLM Benchmark and MMLU Evaluation...")
+    """Main function to run the combined benchmarks."""
+    print("Starting Combined LLM Benchmark (Performance + MMLU)...")
     
-    # Load MMLU data first
     mmlu_sample = load_mmlu_dataset(MMLU_SUBSET, NUM_QUESTIONS)
     if not mmlu_sample:
         print("Exiting due to dataset loading failure.")
@@ -126,24 +136,29 @@ def main():
     results = []
 
     for model_name in MODELS_TO_BENCHMARK:
-        # Pull model if not installed
         if model_name not in installed_models:
             if not pull_model(model_name):
                 results.append({'model': model_name, 'error': 'Failed to pull model'})
                 continue
         
-        # Run MMLU Evaluation
         accuracy = evaluate_model_on_mmlu(model_name, mmlu_sample)
+        tokens_sec = benchmark_performance(model_name, PERFORMANCE_PROMPT)
         
-        # For now, we'll just store accuracy. You can add back the performance benchmark later.
         results.append({
             'model': model_name,
-            'mmlu_accuracy_%': round(accuracy, 2)
+            'mmlu_accuracy_%': round(accuracy, 2),
+            'tokens_per_sec': tokens_sec
         })
 
-    # Display results in a table
     df = pd.DataFrame(results)
-    print("\n--- MMLU Evaluation Results ---")
+    print("\n--- Combined Benchmark Results ---")
+    
+    # Reorder and display results
+    if 'error' in df.columns:
+        df = df[['model', 'mmlu_accuracy_%', 'tokens_per_sec', 'error']]
+    else:
+        df = df[['model', 'mmlu_accuracy_%', 'tokens_per_sec']]
+    
     print(df.to_string())
 
 if __name__ == "__main__":
