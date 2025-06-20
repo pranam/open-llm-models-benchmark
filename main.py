@@ -32,6 +32,7 @@ def get_installed_models():
 def pull_model(model_name):
     """Pulls a model from the Ollama registry, showing progress."""
     print(f"\nPulling model: {model_name}")
+    # ... (code is unchanged)
     current_digest = ''
     try:
         for progress in ollama.pull(model_name, stream=True):
@@ -97,7 +98,6 @@ def evaluate_model_on_mmlu(model_name, dataset):
         sys.stdout.write(f'\r  Question {i+1}/{total}...')
         sys.stdout.flush()
         
-        # Format prompt
         prompt = f"Question: {item['question']}\n"
         for j, choice in enumerate(item['choices']):
             prompt += f"{choices[j]}. {choice}\n"
@@ -108,7 +108,6 @@ def evaluate_model_on_mmlu(model_name, dataset):
         try:
             response = ollama.generate(model=model_name, prompt=prompt)
             response_text = response['response']
-            # Parse answer
             match = re.search(r'\b([A-D])\b', response_text.strip().upper())
             parsed_answer = match.group(1) if match else None
             
@@ -122,9 +121,9 @@ def evaluate_model_on_mmlu(model_name, dataset):
     print(f"MMLU Accuracy: {accuracy:.2f}%")
     return accuracy
 
-# --- Main Execution ---
-def main():
-    """Main function to run the combined benchmarks."""
+# --- Application Modes ---
+def benchmark_mmlu_throughput():
+    """Runs the combined MMLU and performance benchmarks."""
     print("Starting Combined LLM Benchmark (Performance + MMLU)...")
     
     mmlu_sample = load_mmlu_dataset(MMLU_SUBSET, NUM_QUESTIONS)
@@ -153,13 +152,53 @@ def main():
     df = pd.DataFrame(results)
     print("\n--- Combined Benchmark Results ---")
     
-    # Reorder and display results
-    if 'error' in df.columns:
-        df = df[['model', 'mmlu_accuracy_%', 'tokens_per_sec', 'error']]
-    else:
-        df = df[['model', 'mmlu_accuracy_%', 'tokens_per_sec']]
-    
+    df = df[['model', 'mmlu_accuracy_%', 'tokens_per_sec']]
     print(df.to_string())
+
+def run_single_prompt(prompt):
+    """Runs a single prompt across all benchmark models."""
+    print(f'\nRunning prompt: "{prompt}"\n')
+    installed_models = get_installed_models()
+
+    for model_name in MODELS_TO_BENCHMARK:
+        if model_name not in installed_models:
+            print(f"--- Skipping {model_name} (not installed) ---")
+            continue
+
+        print(f'--- Response from {model_name} ---')
+        try:
+            response = ollama.chat(
+                model=model_name,
+                messages=[{'role': 'user', 'content': prompt}],
+            )
+            print(response['message']['content'])
+        except Exception as e:
+            print(f"An error occurred: {e}")
+        print("-" * 40)
+
+# --- Main Execution Router ---
+def main():
+    """Main function to route command-line arguments."""
+    if len(sys.argv) < 2:
+        print("Usage:")
+        print("  python main.py benchmark          - Run the full MMLU and performance benchmark.")
+        print("  python main.py single_prompt \"<your_prompt>\" - Run a single prompt across all models.")
+        return
+
+    command = sys.argv[1]
+
+    if command == "benchmark":
+        benchmark_mmlu_throughput()
+    elif command == "single_prompt":
+        if len(sys.argv) < 3:
+            print("Error: Please provide a prompt for the 'single_prompt' command.")
+            print("Usage: python main.py single_prompt \"<your_prompt>\"")
+            return
+        prompt = sys.argv[2]
+        run_single_prompt(prompt)
+    else:
+        print(f"Error: Unknown command '{command}'")
+        print("Usage: See above")
 
 if __name__ == "__main__":
     main()
